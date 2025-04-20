@@ -1,4 +1,3 @@
-
 Doctor
 ------------------------------------
 
@@ -99,6 +98,7 @@ Valid requests will receive a JSON response with the following keys:
  - `extension`: The sniffed extension of the file.
  - `extracted_by_ocr`: Whether OCR was needed and used during processing.
  - `page_count`: The number of pages, if it applies.
+ - `file_name`: The original name of the uploaded file.
 
 ### Endpoint: /extract/recap/text/
 
@@ -118,6 +118,7 @@ Valid requests will receive a JSON response with the following keys:
 
  - `content`: The utf-8 encoded text of the file
  - `extracted_by_ocr`: Whether OCR was needed and used during processing.
+ - `file_name`: The original name of the uploaded file.
 
 
 ## Utilities
@@ -154,7 +155,7 @@ returns as JSON response with bounding box(es) and text recovered.
           437.8699951171875,
           494.39996337890625
         ],
-        "text": "“No”"
+        "text": ""No""
       },
       {
         "bbox": [
@@ -163,7 +164,7 @@ returns as JSON response with bounding box(es) and text recovered.
           536.8599853515625,
           328.79998779296875
         ],
-        "text": "“Yes”, but did not disclose all relevant medical history"
+        "text": ""Yes"", but did not disclose all relevant medical history"
       },
       {
         "bbox": [
@@ -172,7 +173,7 @@ returns as JSON response with bounding box(es) and text recovered.
           166.54998779296875,
           246
         ],
-        "text": "“No”"
+        "text": ""No""
       }
     ]
   }

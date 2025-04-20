@@ -94,6 +94,7 @@ def extract_recap_document(request) -> JsonResponse:
         )
     filepath = form.cleaned_data["fp"]
     strip_margin = form.cleaned_data["strip_margin"]
+    file_name = form.cleaned_data["file"].name
     content, extracted_by_ocr = extract_recap_pdf(
         filepath=filepath,
         strip_margin=strip_margin,
@@ -103,6 +104,7 @@ def extract_recap_document(request) -> JsonResponse:
         {
             "content": content,
             "extracted_by_ocr": extracted_by_ocr,
+            "file_name": file_name,
         }
     )
 
@@ -119,6 +121,7 @@ def extract_doc_content(request) -> Union[JsonResponse, HttpResponse]:
     ocr_available = form.cleaned_data["ocr_available"]
     extension = form.cleaned_data["extension"]
     fp = form.cleaned_data["fp"]
+    file_name = form.cleaned_data["file"].name
     extracted_by_ocr = False
     if extension == "pdf":
         content, err, returncode, extracted_by_ocr = extract_from_pdf(
@@ -148,6 +151,7 @@ def extract_doc_content(request) -> Union[JsonResponse, HttpResponse]:
             "extension": extension,
             "extracted_by_ocr": extracted_by_ocr,
             "page_count": page_count,
+            "file_name": file_name,
         }
     )
 

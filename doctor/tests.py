@@ -109,6 +109,24 @@ class RECAPExtractionTests(unittest.TestCase):
         self.assertEqual(200, response.status_code, msg="Wrong status code")
         self.assertEqual("1", first_line, msg="Wrong Text")
 
+    def test_recap_file_name_in_response(self):
+        """Test that the file_name field is returned in the recap extract response."""
+        files = make_file(
+            filename="recap_extract/gov.uscourts.cacd.652774.40.0.pdf"
+        )
+        params = {"strip_margin": True}
+        response = requests.post(
+            "http://doctor:5050/extract/recap/text/",
+            files=files,
+            params=params,
+        )
+        self.assertTrue(response.ok, msg="Content extraction failed")
+        self.assertEqual(
+            response.json()["file_name"],
+            "gov.uscourts.cacd.652774.40.0.pdf",
+            msg="File name not correctly returned in response",
+        )
+
 
 class ExtractionTests(unittest.TestCase):
     def test_pdf_to_text(self):
@@ -221,6 +239,20 @@ class ExtractionTests(unittest.TestCase):
             response.json()["page_count"],
             None,
             msg="Failed to extract by OCR",
+        )
+
+    def test_file_name_in_response(self):
+        """Test that the file_name field is returned in the response."""
+        files = make_file(filename="vector-pdf.pdf")
+        data = {"ocr_available": False}
+        response = requests.post(
+            "http://doctor:5050/extract/doc/text/", files=files, data=data
+        )
+        self.assertTrue(response.ok, msg="Content extraction failed")
+        self.assertEqual(
+            response.json()["file_name"],
+            "vector-pdf.pdf",
+            msg="File name not correctly returned in response",
         )
 
     def test_wpd_format(self):
