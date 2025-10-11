@@ -20,8 +20,8 @@ env = environ.FileAwareEnv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = env.bool("DEBUG", default=False)
-SECRET_KEY = "this-is-a-not-so-secret-key"
-ALLOWED_HOSTS = ["doctor", "0.0.0.0", "localhost"]
+SECRET_KEY = env("SECRET_KEY", default="this-is-a-not-so-secret-key")
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["doctor", "0.0.0.0", "localhost"])
 INSTALLED_APPS = []
 ROOT_URLCONF = "doctor.urls"
 WSGI_APPLICATION = "doctor.wsgi.application"
