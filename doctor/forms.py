@@ -26,16 +26,17 @@ class BaseFileForm(forms.Form):
         if not file:
             raise ValidationError("File is missing.")
         self.cleaned_data["extension"] = file.name.split(".")[-1]
+        self.cleaned_data["original_filename"] = file.name
         self.prep_file()
         return file
 
     def prep_file(self):
-        fp = tempfile.NamedTemporaryFile(
-            delete=False, suffix=f'.{self.cleaned_data["extension"]}'
-        )
-        self.cleaned_data["tmp_dir"] = tempfile.TemporaryDirectory()
-        self.cleaned_data["fp"] = fp.name
-        self.temp_save_file(fp.name)
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=f".{self.cleaned_data['extension']}"
+        ) as fp:
+            self.cleaned_data["tmp_dir"] = tempfile.TemporaryDirectory()
+            self.cleaned_data["fp"] = fp.name
+            self.temp_save_file(fp.name)
 
 
 class AudioForm(BaseAudioFile):

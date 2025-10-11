@@ -2,30 +2,29 @@ import asyncio
 import base64
 import io
 import os
-import pdfplumber
 import re
 import subprocess
-import xray
+from collections.abc import ByteString
 from tempfile import NamedTemporaryFile
-from typing import Any, AnyStr, ByteString, Dict, List
+from typing import Any, AnyStr
 
 import eyed3
 import magic
+import pdfplumber
 import requests
-from django.utils.encoding import force_bytes
+import xray
 from eyed3 import id3
-from lxml.etree import XMLSyntaxError
 from lxml.html.clean import Cleaner
 from PIL.Image import Image
 from PyPDF2 import PdfMerger, PdfReader
 from PyPDF2.errors import PdfReadError
-from seal_rookery.search import seal, ImageSizes
+from seal_rookery.search import ImageSizes, seal
 
 from doctor.lib.mojibake import fix_mojibake
 from doctor.lib.text_extraction import (
+    extract_with_ocr,
     get_page_text,
     page_needs_ocr,
-    extract_with_ocr,
     remove_excess_whitespace,
 )
 from doctor.lib.utils import (
@@ -53,13 +52,12 @@ def strip_metadata_from_bytes(pdf_bytes):
     return force_bytes(byte_writer.getvalue())
 
 
-def pdf_bytes_from_images(image_list: List[Image]):
+def pdf_bytes_from_images(image_list: list[Image]):
     """Make a pdf given an array of Image files
 
     :param image_list: List of images
     :type image_list: list
-    :return: pdf_data
-    :type pdf_data: PDF as bytes
+    :return: PDF as bytes
     """
     with io.BytesIO() as output:
         image_list[0].save(
@@ -144,7 +142,7 @@ def get_xray(path):
         bad_redactions = xray.inspect(path)
         return bad_redactions
     except (
-        IOError,
+        OSError,
         ValueError,
         TypeError,
         KeyError,
@@ -169,7 +167,7 @@ def get_page_count(path, extension):
             reader = PdfReader(path)
             return len(reader.pages)
         except (
-            IOError,
+            OSError,
             ValueError,
             TypeError,
             KeyError,
@@ -195,6 +193,7 @@ def get_page_count(path, extension):
 
 def extract_from_pdf(
     path: str,
+    original_filename: str,
     ocr_available: bool = False,
 ) -> Any:
     """Extract text from pdfs.
@@ -207,6 +206,7 @@ def extract_from_pdf(
     If a text-based PDF we fix corrupt PDFs from ca9.
 
     :param path: The path to the PDF
+    :param original_filename: The original file name of the PDF file.
     :param ocr_available: Whether we should do OCR stuff
     :return Tuple of the content itself and any errors we received
     """
@@ -334,14 +334,20 @@ def extract_from_docx(path):
     return content.decode("utf-8"), err, process.returncode
 
 
-def extract_from_html(path):
-    """Extract from html.
+def extract_from_html(path: str) -> tuple[str, str, int]:
+    """Extract from html file by attempting various encodings
 
     A simple wrapper to go get content, and send it along.
+
+    :param path: The file path to the HTML file.
+    :return: A tuple containing:
+             - The extracted and cleaned text content (str), or an empty string on failure.
+             - An error message (str), or an empty string on success.
+             - A return code (int), typically 0 on success, 1 on failure.
     """
     for encoding in ["utf-8", "ISO8859", "cp1252", "latin-1"]:
         try:
-            with open(path, "r", encoding=encoding) as f:
+            with open(path, encoding=encoding) as f:
                 content = f.read()
             content = get_clean_body_content(content)
             content = force_text(content, encoding=encoding)
@@ -352,18 +358,16 @@ def extract_from_html(path):
     return "", "Could not encode content properly", 1
 
 
-def get_clean_body_content(content):
-    """Parse out the body from an html string, clean it up, and send it along."""
+def get_clean_body_content(content: str) -> str:
+    """Parse out the body from an html string, clean it up, and send it along.
+
+    :param content: The HTML content as a string
+    :return: The cleaned HTML body content as a string, or a default error string on failure
+    """
     cleaner = Cleaner(
         style=True, remove_tags=["a", "body", "font", "noscript", "img"]
     )
-    try:
-        return cleaner.clean_html(content)
-    except XMLSyntaxError:
-        return (
-            "Unable to extract the content from this file. Please try "
-            "reading the original."
-        )
+    return cleaner.clean_html(content)
 
 
 def extract_from_txt(filepath):
@@ -380,34 +384,41 @@ def extract_from_txt(filepath):
     err = None
     error_code = 0
     try:
-        with open(filepath, mode="r") as f:
+        with open(filepath) as f:
             data = f.read()
         try:
             # Alas, cp1252 is probably still more popular than utf-8.
             content = smart_text(data, encoding="cp1252")
         except DoctorUnicodeDecodeError:
             content = smart_text(data, encoding="utf-8", errors="ignore")
-    except:
+    except Exception:
         try:
-            blob = open(filepath, "rb").read()
+            with open(filepath, "rb") as f:
+                blob = f.read()
             m = magic.Magic(mime_encoding=True)
             encoding = m.from_buffer(blob)
-            with open(filepath, encoding=encoding, mode="r") as f:
+            with open(filepath, encoding=encoding) as f:
                 data = f.read()
             content = smart_text(data, encoding=encoding, errors="ignore")
-        except:
+        except Exception:
             err = "An error occurred extracting txt file."
             content = ""
             error_code = 1
     return content, err, error_code
 
 
-def extract_from_wpd(path):
+def extract_from_wpd(path: str) -> tuple[str, bytes, int]:
     """Extract text from a Word Perfect file
 
     Yes, courts still use these, so we extract their text using wpd2html. Once
     that's done, we pull out the body of the HTML, and do some minor cleanup
     on it.
+
+    :param path: The file path to the Word Perfect (.wpd) file.
+    :return: A tuple containing:
+             - The extracted and cleaned text content (str)
+             - The standard error output from the wpd2html subprocess (bytes)
+             - The return code of the wpd2html subprocess (int). Returns 1 on Python-level errors
     """
     process = subprocess.Popen(
         ["wpd2html", path],
@@ -415,13 +426,14 @@ def extract_from_wpd(path):
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    content, err = process.communicate()
-    content = get_clean_body_content(content)
+    content_bytes, err = process.communicate()
+    content_str = content_bytes.decode("utf-8")
+    content = get_clean_body_content(content_str)
 
-    return content.decode("utf-8"), err, process.returncode
+    return content, err, process.returncode
 
 
-def download_images(sorted_urls) -> List:
+def download_images(sorted_urls) -> list:
     """Download images and convert to list of PIL images
 
     Once in an array of PIL.images we can easily convert this to a PDF.
@@ -521,7 +533,7 @@ def convert_to_ogg(output_path: AnyStr, media: Any) -> None:
 
 
 def set_mp3_meta_data(
-    audio_data: Dict, mp3_path: AnyStr
+    audio_data: dict, mp3_path: AnyStr
 ) -> eyed3.core.AudioFile:
     """Set the metadata in audio_data to an mp3 at path.
 
@@ -603,7 +615,7 @@ def convert_to_base64(tmp_path: AnyStr) -> AnyStr:
         return base64.b64encode(f.read()).decode()
 
 
-def best_case_name(audio_dict: Dict) -> AnyStr:
+def best_case_name(audio_dict: dict) -> AnyStr:
     """Take an object and return the highest quality case name possible.
 
     In general, this means returning the fields in an order like:
@@ -622,7 +634,7 @@ def best_case_name(audio_dict: Dict) -> AnyStr:
         return audio_dict.get("case_name_short", "")
 
 
-def get_header_stamp(obj: Dict) -> bool:
+def get_header_stamp(obj: dict) -> bool:
     """pdfplumber filter to extract the PDF header stamp.
 
     :param obj: The page object to evaluate.
@@ -633,9 +645,7 @@ def get_header_stamp(obj: Dict) -> bool:
     if "LiberationSans" in obj.get("fontname", ""):
         return True
     # Exception for ca5
-    if obj["y0"] > 750:
-        return True
-    return False
+    return obj["y0"] > 750
 
 
 def clean_document_number(document_number: str) -> str:
