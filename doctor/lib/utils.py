@@ -1,5 +1,6 @@
 import datetime
 import io
+import logging
 import os
 import re
 import subprocess
@@ -7,6 +8,7 @@ import warnings
 from collections import namedtuple
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import six
 from PyPDF2 import PdfMerger
@@ -118,7 +120,7 @@ def smart_text(s, encoding="utf-8", strings_only=False, errors="strict"):
     return force_text(s, encoding, strings_only, errors)
 
 
-class Promise(object):
+class Promise:
     """
     This is just a base class for the proxy class created in
     the closure of the lazy function. It can be used to recognize
@@ -297,7 +299,7 @@ def pdf_has_images(path: str) -> bool:
     """
     with open(path, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-        return True if re.search(rb"/Image ?", pdf_bytes) else False
+        return bool(re.search(rb"/Image ?", pdf_bytes))
 
 
 def ocr_needed(path: str, content: str) -> bool:
@@ -309,9 +311,7 @@ def ocr_needed(path: str, content: str) -> bool:
     :param content: The content extracted from the PDF.
     :return: Whether OCR should be run on the document.
     """
-    if content.strip() == "" or pdf_has_images(path):
-        return True
-    return False
+    return content.strip() == "" or pdf_has_images(path)
 
 
 def make_page_with_text(page, data, h, w):
@@ -331,7 +331,7 @@ def make_page_with_text(page, data, h, w):
     can.setFillAlpha(0)
     for i in range(len(data["level"])):
         try:
-            letter, (x, y, ww, hh), pg = (
+            letter, (x, y, _, hh), pg = (
                 data["text"][i],
                 (
                     data["left"][i],
@@ -341,7 +341,7 @@ def make_page_with_text(page, data, h, w):
                 ),
                 data["page_num"][i],
             )
-        except:
+        except Exception:
             continue
         # Adjust the text to an 8.5 by 11 inch page
         sub = ((11 * 72) / h) * int(hh)
@@ -354,3 +354,23 @@ def make_page_with_text(page, data, h, w):
     can.save()
     packet.seek(0)
     return packet
+
+
+def log_sentry_event(
+    logger: logging.Logger,
+    level: int,
+    message: str,
+    extra: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> None:
+    """
+    Logs a message using a specified logger, level, message, and optional extra data.
+
+    :param logger: The logger instance to use (e.g., logging.getLogger(__name__)).
+    :param level: The logging level (e.g., logging.INFO, logging.WARNING, logging.ERROR).
+    :param message: The message string to log.
+    :param extra: A dictionary containing extra data to attach to the log record.
+    :param kwargs: Additional keyword arguments passed to logger.log(), such as exc_info=True.
+    :return: None
+    """
+    logger.log(level, message, extra=extra, **kwargs)

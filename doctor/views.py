@@ -1,17 +1,18 @@
+import logging
 import mimetypes
 import re
 import shutil
 from http.client import BAD_REQUEST
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import Union
 
 import eyed3
 import img2pdf
-import magic
 import pytesseract
 import requests
 from django.core.exceptions import BadRequest
 from django.http import FileResponse, HttpResponse, JsonResponse
+from lxml.etree import ParserError, XMLSyntaxError
+from magika import Magika
 from PIL import Image
 from PyPDF2 import PdfReader, PdfWriter
 from pytesseract import Output
@@ -26,6 +27,7 @@ from doctor.forms import (
 )
 from doctor.lib.utils import (
     cleanup_form,
+    log_sentry_event,
     make_page_with_text,
     make_png_thumbnail_for_instance,
     make_png_thumbnails,
@@ -42,6 +44,7 @@ from doctor.tasks import (
     extract_from_pdf,
     extract_from_txt,
     extract_from_wpd,
+    extract_recap_pdf,
     get_document_number_from_pdf,
     get_page_count,
     get_xray,
@@ -49,8 +52,11 @@ from doctor.tasks import (
     rasterize_pdf,
     set_mp3_meta_data,
     strip_metadata_from_bytes,
-    extract_recap_pdf,
 )
+
+logger = logging.getLogger(__name__)
+
+magika = Magika()
 
 
 def heartbeat(request) -> HttpResponse:
@@ -109,7 +115,7 @@ def extract_recap_document(request) -> JsonResponse:
     )
 
 
-def extract_doc_content(request) -> Union[JsonResponse, HttpResponse]:
+def extract_doc_content(request) -> JsonResponse | HttpResponse:
     """Extract txt from different document types.
 
     :return: The content of a document/error message.
@@ -123,23 +129,60 @@ def extract_doc_content(request) -> Union[JsonResponse, HttpResponse]:
     fp = form.cleaned_data["fp"]
     file_name = form.cleaned_data["file"].name
     extracted_by_ocr = False
-    if extension == "pdf":
-        content, err, returncode, extracted_by_ocr = extract_from_pdf(
-            fp, ocr_available
+    err = ""
+    # We keep the original file name to use it for debugging purposes, you can find it in local_path (Opinion) field
+    # or filepath_local (AbstractPDF).
+    original_filename = form.cleaned_data["original_filename"]
+    try:
+        if extension == "pdf":
+            content, err, returncode, extracted_by_ocr = extract_from_pdf(
+                fp, original_filename, ocr_available
+            )
+        elif extension == "doc":
+            content, err, returncode = extract_from_doc(fp)
+        elif extension == "docx":
+            content, err, returncode = extract_from_docx(fp)
+        elif extension == "html":
+            content, err, returncode = extract_from_html(fp)
+        elif extension == "txt":
+            content, err, returncode = extract_from_txt(fp)
+        elif extension == "wpd":
+            content, err, returncode = extract_from_wpd(fp)
+        else:
+            returncode = 1
+            err = "Unable to extract content due to unknown extension"
+            content = ""
+
+        if returncode != 0:
+            log_sentry_event(
+                logger=logger,
+                level=logging.ERROR,
+                message="Unable to extract document content",
+                extra={
+                    "file_name": original_filename,
+                    "err": err,
+                },
+                exc_info=True,
+            )
+            pass
+
+    except (XMLSyntaxError, ParserError) as e:
+        error_message = "HTML cleaning failed due to ParserError."
+        if isinstance(e, XMLSyntaxError):
+            error_message = "HTML cleaning failed due to XMLSyntaxError."
+
+        log_sentry_event(
+            logger=logger,
+            level=logging.ERROR,
+            message=error_message,
+            extra={
+                "file_name": original_filename,
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+            },
+            exc_info=True,
         )
-    elif extension == "doc":
-        content, err, returncode = extract_from_doc(fp)
-    elif extension == "docx":
-        content, err, returncode = extract_from_docx(fp)
-    elif extension == "html":
-        content, err, returncode = extract_from_html(fp)
-    elif extension == "txt":
-        content, err, returncode = extract_from_txt(fp)
-    elif extension == "wpd":
-        content, err, returncode = extract_from_wpd(fp)
-    else:
-        content = ""
-        err = "Unable to extract content due to unknown extension"
+        content = "Unable to extract the content from this file. Please try reading the original."
 
     # Get page count if you can
     page_count = get_page_count(fp, extension)
@@ -215,14 +258,14 @@ def xray(request) -> JsonResponse:
                 {"error": True, "msg": "Failed validation"}, status=BAD_REQUEST
             )
         extension = form.cleaned_data["extension"]
-        if "pdf" != extension.casefold():
+        if extension.casefold() != "pdf":
             return JsonResponse(
                 {"error": True, "msg": "Failed file type"}, status=BAD_REQUEST
             )
         results = get_xray(form.cleaned_data["fp"])
         if results.get("error", False):
             return JsonResponse(results, status=BAD_REQUEST)
-    except:
+    except Exception:
         pass
     finally:
         cleanup_form(form)
@@ -243,76 +286,155 @@ def page_count(request) -> HttpResponse:
     return HttpResponse(pg_count)
 
 
-def extract_mime_type(request) -> Union[JsonResponse, HttpResponse]:
-    """Identify the mime type of a document
+def extract_mime_type(request) -> JsonResponse | HttpResponse:
+    """Identify the MIME type of an uploaded document using Magika, with
+    fallbacks for formats Magika fails to recognize.
 
-    :return: Mime type
+    :param request: django request containing the file to check
+    :return: MIME type as JSON
     """
-    form = DocumentForm(request.GET, request.FILES)
-    if not form.is_valid():
-        return HttpResponse("Failed validation", status=BAD_REQUEST)
-    mime = form.cleaned_data["mime"]
-    mimetype = magic.from_file(form.cleaned_data["fp"], mime=mime)
-    cleanup_form(form)
-    return JsonResponse({"mimetype": mimetype})
-
-
-def extract_extension(request) -> HttpResponse:
-    """A handful of workarounds for getting extensions we can trust."""
     form = MimeForm(request.GET, request.FILES)
     if not form.is_valid():
         return HttpResponse("Failed validation", status=BAD_REQUEST)
+
     content = form.cleaned_data["file"].read()
 
-    file_str = magic.from_buffer(content)
-    if file_str.startswith("Composite Document File V2 Document"):
-        # Workaround for issue with libmagic1==5.09-2 in Ubuntu 12.04. Fixed
-        # in libmagic 5.11-2.
-        mime = "application/msword"
-    elif file_str == "(Corel/WP)":
+    result = magika.identify_bytes(content)
+    mime = result.output.mime_type
+
+    # --- Fallbacks and corrections ---
+    header = content[:64]
+
+    # WordPerfect: Magika often returns pickle/octet-stream
+    if mime in (
+        "application/x-python-pickle",
+        "application/octet-stream",
+    ) and (header.startswith(b"\xffWPC") or b"WPC" in header[:8]):
         mime = "application/vnd.wordperfect"
-    elif file_str == "C source, ASCII text":
-        mime = "text/plain"
-    elif file_str.startswith("WordPerfect document"):
-        mime = "application/vnd.wordperfect"
-    elif re.findall(
-        r"(Audio file with ID3.*MPEG.*layer III)|(.*Audio Media.*)", file_str
-    ):
-        mime = "audio/mpeg"
+
+    # ASF container → WMA/WMV
+    elif header.startswith(b"\x30\x26\xb2\x75\x8e\x66\xcf\x11"):
+        if b"WMA" in header or b"WM/" in header:
+            mime = "audio/x-ms-wma"
+        else:
+            mime = "video/x-ms-wmv"
+
+    # PDF (misdetected as .bin)
+    elif re.search(rb"%PDF-[0-9]+(\.[0-9]+)?", content[:1024]):
+        mime = "application/pdf"
+
+    # Audio: quick signature checks for FLAC/AAC/OGG
+    elif header.startswith(b"fLaC"):
+        mime = "audio/flac"
+    elif header[:2] in (b"\xff\xf1", b"\xff\xf9"):
+        mime = "audio/aac"
+    elif header.startswith(b"OggS"):
+        mime = "audio/ogg"
+
+    return JsonResponse({"mimetype": mime})
+
+
+def extract_extension(request) -> HttpResponse:
+    """A handful of workarounds for getting extensions we can trust
+
+    :param request: django request containing the uploaded file
+    :returns: the file extension as plain text
+    """
+    form = MimeForm(request.GET, request.FILES)
+    if not form.is_valid():
+        return HttpResponse("Failed validation", status=BAD_REQUEST)
+
+    content = form.cleaned_data["file"].read()
+    # Normalize to bytes
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="ignore")
+
+    result = magika.identify_bytes(content)
+    mime = result.output.mime_type
+    exts = result.output.extensions or []
+
+    if exts:
+        # Usually the first one is the best
+        extension = "." + exts[0]
     else:
-        # No workaround necessary
-        mime = magic.from_buffer(content, mime=True)
-    extension = mimetypes.guess_extension(mime)
+        # Fallback to mimetypes lib
+        extension = mimetypes.guess_extension(mime)
+        log_sentry_event(
+            logger=logger,
+            level=logging.ERROR,
+            message="Magika failed to infer file extension",
+            extra={
+                "file_name": form.cleaned_data["file"].name,
+                "file_size": len(content),
+                "mimetype": mime,
+            },
+            exc_info=True,
+        )
+
+    # --- Handle common Magika misclassifications ---
+    if mime == "application/CDFV2" or mime.startswith("CDFV2"):
+        mime = "application/msword"
+        extension = ".doc"
+    elif mime == "application/corel-wp":
+        mime = "application/vnd.wordperfect"
+        extension = ".wpd"
+    elif mime in ("text/x-c", "text/x-csrc"):
+        mime = "text/plain"
+        extension = ".txt"
+    elif mime == "application/vnd.wordperfect" or mime.startswith(
+        "application/x-wordperfect"
+    ):
+        extension = ".wpd"
+    else:
+        # Fallback audio pattern
+        if re.findall(
+            r"(Audio file with ID3.*MPEG.*layer III)|(.*Audio Media.*)",
+            str(content[:200]),
+        ):
+            mime = "audio/mpeg"
+            extension = ".mp3"
+
+    # --- WordPerfect misidentified as pickle or generic binary ---
+    if mime in (
+        "application/x-python-pickle",
+        "application/octet-stream",
+    ) and (content.startswith(b"\xffWPC") or b"WPC" in content[:8]):
+        mime = "application/vnd.wordperfect"
+        extension = ".wpd"
+
+    # --- ASF/WMA header detection ---
+    if content.startswith(b"\x30\x26\xb2\x75\x8e\x66\xcf\x11"):
+        mime = "audio/x-ms-wma"
+        extension = ".wma"
+
+    # --- Misclassified .obj or .bin ---
     if extension == ".obj":
-        # It could be a wpd, if it's not a PDF
-        if "PDF" in content[0:40]:
-            # Does 'PDF' appear in the beginning of the content?
+        if b"PDF" in content[0:40]:
             extension = ".pdf"
         else:
             extension = ".wpd"
-
-    # The extension is .bin, look in the content if we can infer the
-    # content type as pdf. See: https://bugs.astron.com/view.php?id=446
-    if extension == ".bin":
-        # Check if %PDF-X.X is in the first 1024 bytes of content
+    elif extension == ".bin":
         pattern = rb"%PDF-[0-9]+(\.[0-9]+)?"
-        matches = re.search(pattern, content[:1024])
-        if matches:
-            # Document contains a pdf version, so the file must be a pdf
+        if re.search(pattern, content[:1024]):
             extension = ".pdf"
 
     fixes = {
         ".htm": ".html",
-        ".xml": ".html",
         ".wsdl": ".html",
         ".ksh": ".txt",
         ".asf": ".wma",
         ".dot": ".doc",
+        ".mpga": ".mp3",
+        ".x-ms-wma": ".wma",
+        ".x-ms-wmv": ".wmv",
+        ".vnd.wordperfect": ".wpd",
     }
-    return HttpResponse(fixes.get(extension, extension).lower())
+
+    final_ext = fixes.get(extension, extension).lower()
+    return HttpResponse(final_ext)
 
 
-def pdf_to_text(request) -> Union[JsonResponse, HttpResponse]:
+def pdf_to_text(request) -> JsonResponse | HttpResponse:
     """Extract text from text based PDFs immediately.
 
     :return:
@@ -372,9 +494,7 @@ def fetch_audio_duration(request) -> HttpResponse:
         return HttpResponse(str(e))
 
 
-def convert_audio(
-    request, output_format: str
-) -> Union[FileResponse, HttpResponse]:
+def convert_audio(request, output_format: str) -> FileResponse | HttpResponse:
     """Converts an uploaded audio file to the specified output format and
     updates its metadata.
 
@@ -393,13 +513,15 @@ def convert_audio(
         case "ogg":
             convert_to_ogg(filepath, media_file)
         case _:
-            raise NotImplemented
-    response = FileResponse(open(filepath, "rb"))
+            raise NotImplementedError
+    response = FileResponse(
+        open(filepath, "rb")  # noqa: SIM115 FileResponse closes the file
+    )
     cleanup_form(form)
     return response
 
 
-def embed_text(request) -> Union[FileResponse, HttpResponse]:
+def embed_text(request) -> FileResponse | HttpResponse:
     """Embed text onto an image PDF.
 
     :return: Embedded PDF
@@ -416,20 +538,23 @@ def embed_text(request) -> Union[FileResponse, HttpResponse]:
         image = Image.open(destination.name)
         w, h = image.width, image.height
         output = PdfWriter()
-        existing_pdf = PdfReader(open(fp, "rb"))
-        for page in range(0, len(existing_pdf.pages)):
-            packet = make_page_with_text(page + 1, data, h, w)
-            new_pdf = PdfReader(packet)
-            page = existing_pdf.pages[page]
-            page.merge_page(new_pdf.pages[0])
-            output.add_page(page)
+        with open(fp, "rb") as f:
+            existing_pdf = PdfReader(f)
+            for page in range(0, len(existing_pdf.pages)):
+                packet = make_page_with_text(page + 1, data, h, w)
+                new_pdf = PdfReader(packet)
+                page = existing_pdf.pages[page]
+                page.merge_page(new_pdf.pages[0])
+                output.add_page(page)
 
         with NamedTemporaryFile(suffix=".pdf") as pdf_destination:
-            outputStream = open(pdf_destination.name, "wb")
-            output.write(outputStream)
-            outputStream.close()
-            img = open(pdf_destination.name, "rb")
-            response = FileResponse(img)
+            with open(pdf_destination.name, "wb") as outputStream:
+                output.write(outputStream)
+            response = FileResponse(
+                open(  # noqa: SIM115 FileResponse closes the file
+                    pdf_destination.name, "rb"
+                )
+            )
             cleanup_form(form)
             return response
 

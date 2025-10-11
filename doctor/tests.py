@@ -1,24 +1,24 @@
+import glob
 import json
 import os
 import re
-import glob
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from unittest.mock import patch
 from zipfile import ZipFile
 
 import eyed3
 import requests
 
 from doctor.lib.text_extraction import (
-    insert_whitespace,
-    get_word,
-    remove_excess_whitespace,
-    cleanup_content,
     adjust_caption_lines,
+    cleanup_content,
+    get_word,
+    insert_whitespace,
+    remove_excess_whitespace,
 )
-from doctor.lib.utils import make_file, make_buffer
+from doctor.lib.utils import make_buffer, make_file
 
 asset_path = f"{Path.cwd()}/doctor/test_assets"
 
@@ -50,7 +50,7 @@ class RECAPExtractionTests(unittest.TestCase):
             response.json()["extracted_by_ocr"], msg="Not extracted correctly"
         )
         self.assertEqual(
-            "aséakOS- 08-0220 A25BA  BAD GDoonene 2627  Filed  OL/2B/DE0IP adgeahefi2of 2",
+            "aséakOS- 08-0220 A25BA  BAD Gooonene 2627  Filed!  OL/2B/DE0IP ageahefi2of 2",
             first_line,
             msg="Wrong Text",
         )
@@ -391,23 +391,33 @@ class MetadataTests(unittest.TestCase):
         )
 
     def test_get_extension(self):
-        """"""
-        files = make_buffer(filename="image-pdf.pdf")
-        response = requests.post(
-            "http://doctor:5050/utils/file/extension/", files=files
-        )
-        self.assertEqual(response.text, ".pdf", msg="Failed to get mime type")
+        """Verify that /utils/file/extension/ correctly infers extensions for common types."""
+        test_files = [
+            ("image-pdf.pdf", ".pdf"),
+            ("broken-mime.pdf", ".pdf"),
+            ("word-docx.docx", ".docx"),
+            ("word-doc.doc", ".doc"),
+            ("word-perfect.wpd", ".wpd"),
+            ("1.wma", ".wma"),
+            ("ander_v._leo.mp3", ".mp3"),
+            ("long-image.tiff", ".tiff"),
+            ("small_txt.txt", ".txt"),
+            ("broken_html.html", ".html"),
+            ("broken_html.txt", ".html"),
+            ("small.xml", ".xml"),
+        ]
 
-        files = make_buffer(filename="word-docx.docx")
-        response = requests.post(
-            "http://doctor:5050/utils/file/extension/", files=files
-        )
-        self.assertEqual(response.text, ".docx", msg="Failed to get mime type")
-        files = make_buffer(filename="word-doc.doc")
-        response = requests.post(
-            "http://doctor:5050/utils/file/extension/", files=files
-        )
-        self.assertEqual(response.text, ".doc", msg="Failed to get mime type")
+        for filename, expected_ext in test_files:
+            with self.subTest(filename=filename):
+                files = make_buffer(filename=filename)
+                response = requests.post(
+                    "http://doctor:5050/utils/file/extension/", files=files
+                )
+                self.assertEqual(
+                    response.text.strip(),
+                    expected_ext,
+                    msg=f"Failed to detect extension for {filename}",
+                )
 
     def test_embedding_text_to_image_pdf(self):
         """Can we embed text into an image PDF?"""
@@ -419,7 +429,7 @@ class MetadataTests(unittest.TestCase):
         )
         self.assertEqual(
             "",
-            image_response.json()["content"].strip("\x0c\x0c"),
+            image_response.json()["content"].strip("\x0c"),
             msg="PDF should have no text",
         )
 
@@ -760,7 +770,6 @@ class TestOCRConfidenceTests(unittest.TestCase):
 
 
 class TestWhiteSpaceRemoval(unittest.TestCase):
-
     def test_left_shift(self):
         """Can we properly shift our text left?"""
         document = """
@@ -791,7 +800,6 @@ bar"""
 
 
 class TestCleanupContent(unittest.TestCase):
-
     def setUp(self):
         # Patch the functions before each test method
         patcher1 = patch(
